@@ -56,8 +56,25 @@ if ! sudo apt-get install -y "${SYSTEM_PKGS[@]}"; then
 fi
 info "System packages installed"
 
+# ── Virtual environment ────────────────────────────────────────────────────────
+heading "Setting up Python virtual environment"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$SCRIPT_DIR/.venv"
+
+# --system-site-packages lets the venv see system python3-dbus and python3-gi
+if [[ ! -d "$VENV_DIR" ]]; then
+    python3 -m venv --system-site-packages "$VENV_DIR"
+    info "Created venv at $VENV_DIR"
+else
+    info "Venv already exists at $VENV_DIR"
+fi
+
+VENV_PYTHON="$VENV_DIR/bin/python"
+VENV_PIP="$VENV_DIR/bin/pip"
+
 # ── Python packages ───────────────────────────────────────────────────────────
-heading "Installing Python packages (pip)"
+heading "Installing Python packages into venv"
 
 PIP_PKGS=(
     "paddleocr>=2.7"
@@ -67,8 +84,13 @@ PIP_PKGS=(
 )
 
 warn "This may take a few minutes (PaddlePaddle is large)…"
-if ! pip3 install --user "${PIP_PKGS[@]}"; then
-    die "pip3 install failed."
+# setuptools must be installed first — langdetect's setup.py uses distutils
+# which was removed in Python 3.12+ but setuptools provides a compatibility shim.
+if ! "$VENV_PIP" install --upgrade setuptools; then
+    die "Failed to install setuptools."
+fi
+if ! "$VENV_PIP" install "${PIP_PKGS[@]}"; then
+    die "pip install into venv failed."
 fi
 info "Python packages installed"
 
@@ -149,7 +171,7 @@ else
     TO_LIST=$(printf "'%s'," "${SELECTED_TO[@]}")
     TO_LIST="[${TO_LIST%,}]"
 
-    python3 - <<PYEOF
+    "$VENV_PYTHON" - <<PYEOF
 import sys
 
 from_codes = ${FROM_LIST}
@@ -227,17 +249,24 @@ TOML
     info "Config written to $CONFIG_FILE"
 fi
 
-# ── Install the package itself ────────────────────────────────────────────────
-heading "Installing onscreen-translator"
+# ── Install the package itself into the venv ──────────────────────────────────
+heading "Installing onscreen-translator into venv"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-if pip3 install --user -e "$SCRIPT_DIR"; then
+if "$VENV_PIP" install -e "$SCRIPT_DIR"; then
     info "onscreen-translator installed (editable mode)"
 else
-    warn "pip editable install failed — you can still run it with:"
-    warn "  python3 -m onscreen_translator.main"
+    warn "Editable install failed — you can still run it with:"
+    warn "  $VENV_PYTHON -m onscreen_translator.main"
 fi
+
+# ── Create a launcher wrapper script ─────────────────────────────────────────
+LAUNCHER="$SCRIPT_DIR/onscreen-translator"
+cat > "$LAUNCHER" <<LAUNCHER_EOF
+#!/usr/bin/env bash
+exec "$VENV_DIR/bin/python" -m onscreen_translator.main "\$@"
+LAUNCHER_EOF
+chmod +x "$LAUNCHER"
+info "Launcher created at $LAUNCHER"
 
 # ── Autostart (optional) ──────────────────────────────────────────────────────
 heading "Autostart (optional)"
@@ -252,12 +281,10 @@ read -rp "Add onscreen-translator to autostart on login? [y/N] " ADD_AUTOSTART
 if [[ "$ADD_AUTOSTART" =~ ^[Yy]$ ]]; then
     mkdir -p "$AUTOSTART_DIR"
     cp "$DESKTOP_SRC" "$AUTOSTART_FILE"
-    # Patch the Exec line to use the absolute path in case ~/.local/bin isn't on PATH yet
-    EXEC_PATH=$(command -v onscreen-translator 2>/dev/null || echo "onscreen-translator")
-    sed -i "s|^Exec=.*|Exec=$EXEC_PATH|" "$AUTOSTART_FILE"
+    sed -i "s|^Exec=.*|Exec=$LAUNCHER|" "$AUTOSTART_FILE"
     info "Autostart entry created at $AUTOSTART_FILE"
 else
-    info "Skipped autostart — run manually with: onscreen-translator"
+    info "Skipped autostart — run manually with: $LAUNCHER"
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -266,9 +293,9 @@ printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━
 printf "${BOLD}${GREEN}  onscreen-translator is ready!${RESET}\n"
 printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
 echo ""
-printf "  ${BOLD}Start:${RESET}   onscreen-translator\n"
-printf "  ${BOLD}Hotkey:${RESET}  Super+T  (configurable in $CONFIG_FILE)\n"
-printf "  ${BOLD}Config:${RESET}  $CONFIG_FILE\n"
+printf "  ${BOLD}Start:${RESET}   %s\n" "$LAUNCHER"
+printf "  ${BOLD}Hotkey:${RESET}  Super+T  (configurable in %s)\n" "$CONFIG_FILE"
+printf "  ${BOLD}Config:${RESET}  %s\n" "$CONFIG_FILE"
 echo ""
 printf "  On first launch PaddleOCR will download its models (~450 MB).\n"
 printf "  Subsequent launches will be instant.\n"
