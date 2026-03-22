@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Onscreen Translator
+Comment=Live on-screen translator for Wayland
+Exec=onscreen-translator
+Icon=accessories-dictionary
+Categories=Utility;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
