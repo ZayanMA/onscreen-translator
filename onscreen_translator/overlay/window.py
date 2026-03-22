@@ -1,7 +1,7 @@
 import gi
 gi.require_version('Gtk', '4.0')
-gi.require_version('GtkLayerShell', '1.0')
-from gi.repository import Gtk, GtkLayerShell, GLib, Gdk, Pango
+gi.require_version('Gtk4LayerShell', '1.0')
+from gi.repository import Gtk, Gtk4LayerShell as GtkLayerShell, GLib, Gdk, Pango
 import logging
 from pathlib import Path
 

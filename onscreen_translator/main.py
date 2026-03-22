@@ -4,6 +4,8 @@ onscreen-translator: Live on-screen translator for Linux/Wayland.
 Uses PaddleOCR + Argos Translate (fully offline, no API keys).
 """
 import sys
+import os
+import socket
 import logging
 import concurrent.futures
 import dbus
@@ -17,8 +19,9 @@ from onscreen_translator.config.settings import Settings
 from onscreen_translator.ocr_translate.ocr import OCREngine
 from onscreen_translator.ocr_translate.translator import Translator
 from onscreen_translator.portal.screenshot import ScreenshotPortal
-from onscreen_translator.portal.shortcuts import ShortcutsPortal
 from onscreen_translator.overlay.window import TranslationOverlay
+
+SOCKET_PATH = "/tmp/onscreen-translator.sock"
 
 logging.basicConfig(
     level=logging.INFO,

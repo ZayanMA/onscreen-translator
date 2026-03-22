@@ -12,9 +12,14 @@ class OCREngine:
 
     def initialize(self):
         """Load models. Call in a background thread at startup."""
+        import logging as _logging
+        # Silence paddle's very verbose internal loggers
+        for _name in ("ppocr", "paddle", "paddleocr", "paddlex"):
+            _logging.getLogger(_name).setLevel(_logging.ERROR)
+
         from paddleocr import PaddleOCR
-        # lang='ch' enables multilingual (Latin + CJK). use_angle_cls handles rotated text.
-        self._ocr = PaddleOCR(use_angle_cls=True, lang='ch', show_log=False)
+        # PaddleOCR 3.x API: lang='ch' covers multilingual (CJK + Latin scripts)
+        self._ocr = PaddleOCR(lang='ch')
         logger.info("PaddleOCR initialized")
 
     def extract(self, image_path: str) -> str:
@@ -22,18 +27,26 @@ class OCREngine:
         if self._ocr is None:
             raise RuntimeError("OCREngine not initialized. Call initialize() first.")
 
-        result = self._ocr.ocr(image_path, cls=True)
-        if not result or not result[0]:
+        result = self._ocr.ocr(image_path)
+        if not result:
             return ""
 
         lines = []
-        for block in result:
-            if block is None:
+        for page in result:
+            if page is None:
                 continue
-            for line in block:
-                text, confidence = line[1]
-                if confidence > 0.5:
-                    lines.append(text)
+            for item in page:
+                # PaddleOCR 3.x returns objects with .text and .score attributes
+                # PaddleOCR 2.x returned [[box, (text, score)], ...]
+                if hasattr(item, 'text'):
+                    if item.score > 0.5:
+                        lines.append(item.text)
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    text_info = item[1]
+                    if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
+                        text, score = text_info[0], text_info[1]
+                        if score > 0.5:
+                            lines.append(text)
 
         return "\n".join(lines)
 
