@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Trigger script for onscreen-translator.
+# Add this as a GNOME custom keyboard shortcut:
+#   Settings → Keyboard → Keyboard Shortcuts → Custom Shortcuts → +
+#   Name: Translate Screen
+#   Command: /home/zayan/Documents/code/repos/onscreen-translator/onscreen-translator-trigger
+#   Shortcut: Super+T (or whatever you prefer)
+python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    s.connect('/tmp/onscreen-translator.sock')
+    s.close()
+except Exception as e:
+    print(f'onscreen-translator is not running: {e}', file=sys.stderr)
+    sys.exit(1)
+"

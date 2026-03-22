@@ -259,14 +259,68 @@ else
     warn "  $VENV_PYTHON -m onscreen_translator.main"
 fi
 
-# ── Create a launcher wrapper script ─────────────────────────────────────────
+# ── Create launcher scripts ───────────────────────────────────────────────────
 LAUNCHER="$SCRIPT_DIR/onscreen-translator"
 cat > "$LAUNCHER" <<LAUNCHER_EOF
 #!/usr/bin/env bash
-exec "$VENV_DIR/bin/python" -m onscreen_translator.main "\$@"
+SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+export GI_TYPELIB_PATH="/usr/lib/x86_64-linux-gnu/girepository-1.0\${GI_TYPELIB_PATH:+:\$GI_TYPELIB_PATH}"
+export GDK_BACKEND=wayland
+export PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+exec "\$SCRIPT_DIR/.venv/bin/python" -m onscreen_translator.main "\$@"
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 info "Launcher created at $LAUNCHER"
+
+LAUNCHER_TRIGGER="$SCRIPT_DIR/onscreen-translator-trigger"
+cat > "$LAUNCHER_TRIGGER" <<TRIGGER_EOF
+#!/usr/bin/env bash
+python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    s.connect('/tmp/onscreen-translator.sock')
+    s.close()
+except Exception as e:
+    print(f'onscreen-translator is not running: {e}', file=sys.stderr)
+    sys.exit(1)
+"
+TRIGGER_EOF
+chmod +x "$LAUNCHER_TRIGGER"
+info "Trigger script created at $LAUNCHER_TRIGGER"
+
+# ── Register GNOME keyboard shortcut via gsettings ────────────────────────────
+heading "Registering keyboard shortcut (Super+T)"
+
+if command -v gsettings &>/dev/null; then
+    BINDING_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/onscreen-translator/"
+    BASE_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
+    BINDING_SCHEMA="$BASE_SCHEMA.custom-keybinding:$BINDING_PATH"
+
+    # Set the individual shortcut properties
+    gsettings set "$BINDING_SCHEMA" name "Translate Screen" 2>/dev/null
+    gsettings set "$BINDING_SCHEMA" command "$LAUNCHER_TRIGGER" 2>/dev/null
+    gsettings set "$BINDING_SCHEMA" binding "<Super>t" 2>/dev/null
+
+    # Add to the custom-keybindings list (preserve existing entries)
+    CURRENT=$(gsettings get "$BASE_SCHEMA" custom-keybindings 2>/dev/null || echo "@as []")
+    if echo "$CURRENT" | grep -q "onscreen-translator"; then
+        warn "Keyboard shortcut already registered — updated command path."
+    else
+        # Parse existing list and append our path
+        if [[ "$CURRENT" == "@as []" || "$CURRENT" == "[]" ]]; then
+            NEW_LIST="['$BINDING_PATH']"
+        else
+            # Remove trailing ] and append
+            NEW_LIST="${CURRENT%]}, '$BINDING_PATH']"
+        fi
+        gsettings set "$BASE_SCHEMA" custom-keybindings "$NEW_LIST" 2>/dev/null
+        info "Keyboard shortcut Super+T registered in GNOME"
+    fi
+else
+    warn "gsettings not found — skipping automatic hotkey registration."
+    warn "Manually add $LAUNCHER_TRIGGER as a custom GNOME keyboard shortcut."
+fi
 
 # ── Autostart (optional) ──────────────────────────────────────────────────────
 heading "Autostart (optional)"
