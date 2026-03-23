@@ -79,7 +79,6 @@ heading "Installing Python packages into venv"
 PIP_PKGS=(
     "paddleocr>=2.7"
     "paddlepaddle>=2.6"
-    "argostranslate>=1.9"
     "langdetect>=1.0"
 )
 
@@ -94,125 +93,48 @@ if ! "$VENV_PIP" install "${PIP_PKGS[@]}"; then
 fi
 info "Python packages installed"
 
-# ── Argos Translate language pairs ───────────────────────────────────────────
-heading "Argos Translate language model selection"
+# ── Ollama setup ──────────────────────────────────────────────────────────────
+heading "Ollama LLM setup (translation engine)"
 
-# Available pairs: (from_code, to_code, display_name)
-declare -a LANG_CODES_FROM
-declare -a LANG_CODES_TO
-declare -a LANG_NAMES
-
-LANG_CODES_FROM=( ja   zh   ko   es   fr   de   it   pt   ru   ar  )
-LANG_CODES_TO=(   en   en   en   en   en   en   en   en   en   en  )
-LANG_NAMES=(
-    "Japanese → English"
-    "Chinese (Simplified) → English"
-    "Korean → English"
-    "Spanish → English"
-    "French → English"
-    "German → English"
-    "Italian → English"
-    "Portuguese → English"
-    "Russian → English"
-    "Arabic → English"
-)
-
-echo ""
-echo "Select the language pairs you want to install."
-echo "Enter the numbers separated by spaces, or type ${BOLD}all${RESET} for all of them."
-echo ""
-
-for i in "${!LANG_NAMES[@]}"; do
-    printf "  ${BOLD}%2d)${RESET} %s\n" $((i + 1)) "${LANG_NAMES[$i]}"
-done
-
-echo ""
-read -rp "Your choice: " USER_CHOICE
-
-declare -a SELECTED_FROM
-declare -a SELECTED_TO
-declare -a SELECTED_NAMES
-
-if [[ "$USER_CHOICE" == "all" || "$USER_CHOICE" == "ALL" ]]; then
-    SELECTED_FROM=( "${LANG_CODES_FROM[@]}" )
-    SELECTED_TO=(   "${LANG_CODES_TO[@]}"   )
-    SELECTED_NAMES=( "${LANG_NAMES[@]}" )
-else
-    for token in $USER_CHOICE; do
-        if ! [[ "$token" =~ ^[0-9]+$ ]]; then
-            warn "Ignoring non-numeric token: $token"
-            continue
-        fi
-        idx=$((token - 1))
-        if [[ "$idx" -lt 0 || "$idx" -ge "${#LANG_NAMES[@]}" ]]; then
-            warn "Number out of range, ignoring: $token"
-            continue
-        fi
-        SELECTED_FROM+=( "${LANG_CODES_FROM[$idx]}" )
-        SELECTED_TO+=(   "${LANG_CODES_TO[$idx]}"   )
-        SELECTED_NAMES+=( "${LANG_NAMES[$idx]}" )
-    done
-fi
-
-if [[ "${#SELECTED_FROM[@]}" -eq 0 ]]; then
-    warn "No language pairs selected — skipping model download."
-    warn "You can run install.sh again later to add language pairs."
-else
+if ! command -v ollama &>/dev/null; then
+    warn "Ollama is not installed."
     echo ""
-    info "Will download and install:"
-    for name in "${SELECTED_NAMES[@]}"; do
-        printf "    • %s\n" "$name"
-    done
+    printf "  Install it with:\n"
+    printf "    ${BOLD}curl -fsSL https://ollama.com/install.sh | sh${RESET}\n"
     echo ""
+    printf "  Then pull a translation model:\n"
+    printf "    ${BOLD}ollama pull llama3.2${RESET}      (~2 GB, fast)\n"
+    printf "    ${BOLD}ollama pull qwen2.5:7b${RESET}    (~4.7 GB, better Japanese/Chinese quality)\n"
+    echo ""
+    warn "Re-run install.sh after installing Ollama to complete setup."
+else
+    info "Ollama found: $(ollama --version 2>/dev/null || echo 'unknown version')"
+    echo ""
+    echo "Which model should be used for translation?"
+    printf "  ${BOLD}1)${RESET} llama3.2      (~2 GB, fast, good general quality)\n"
+    printf "  ${BOLD}2)${RESET} qwen2.5:7b    (~4.7 GB, better Japanese/Chinese quality)\n"
+    printf "  ${BOLD}3)${RESET} Custom        (enter a model name manually)\n"
+    echo ""
+    read -rp "Choice [1]: " MODEL_CHOICE
 
-    # Build Python lists for the inline script
-    FROM_LIST=$(printf "'%s'," "${SELECTED_FROM[@]}")
-    FROM_LIST="[${FROM_LIST%,}]"
-    TO_LIST=$(printf "'%s'," "${SELECTED_TO[@]}")
-    TO_LIST="[${TO_LIST%,}]"
+    case "$MODEL_CHOICE" in
+        2) CHOSEN_MODEL="qwen2.5:7b" ;;
+        3) read -rp "Model name: " CHOSEN_MODEL ;;
+        *) CHOSEN_MODEL="llama3.2" ;;
+    esac
 
-    "$VENV_PYTHON" - <<PYEOF
-import sys
-
-from_codes = ${FROM_LIST}
-to_codes   = ${TO_LIST}
-
-try:
-    import argostranslate.package as pkg
-except ImportError:
-    print("ERROR: argostranslate not importable — is it installed?", file=sys.stderr)
-    sys.exit(1)
-
-print("Updating Argos Translate package index…")
-try:
-    pkg.update_package_index()
-except Exception as e:
-    print(f"WARNING: Could not update index ({e}). Trying with cached index.", file=sys.stderr)
-
-available = pkg.get_available_packages()
-
-pairs = list(zip(from_codes, to_codes))
-total = len(pairs)
-
-for i, (fc, tc) in enumerate(pairs, 1):
-    print(f"[{i}/{total}] Looking for {fc} → {tc} …")
-    candidates = [p for p in available if p.from_code == fc and p.to_code == tc]
-    if not candidates:
-        print(f"  WARNING: No package found for {fc} → {tc}. Skipping.")
-        continue
-    package = candidates[0]
-    print(f"  Downloading {package.from_name} → {package.to_name} …")
-    try:
-        dl_path = package.download()
-        pkg.install_from_path(dl_path)
-        print(f"  Installed {fc} → {tc}")
-    except Exception as e:
-        print(f"  ERROR installing {fc} → {tc}: {e}", file=sys.stderr)
-
-print("Language model installation complete.")
-PYEOF
-
-    info "Argos Translate language models installed"
+    info "Pulling ${CHOSEN_MODEL} — this may take several minutes…"
+    if ollama pull "$CHOSEN_MODEL"; then
+        info "Model ${CHOSEN_MODEL} ready"
+        # Update config.toml with chosen model
+        if [[ -f "$CONFIG_FILE" ]]; then
+            sed -i "s/^model = .*/model = \"${CHOSEN_MODEL}\"/" "$CONFIG_FILE" 2>/dev/null || true
+            info "Config updated: ollama model = ${CHOSEN_MODEL}"
+        fi
+    else
+        warn "ollama pull failed — you can pull the model manually later:"
+        warn "  ollama pull ${CHOSEN_MODEL}"
+    fi
 fi
 
 # ── Default config ────────────────────────────────────────────────────────────

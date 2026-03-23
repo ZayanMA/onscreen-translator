@@ -1,2 +1,22 @@
-onscreen_translator/
+# Virtual environment
+.venv/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Generated launcher scripts (created by install.sh)
 onscreen-translator
+onscreen-translator-trigger
+
+# Temporary files
+/tmp/ost_crop.png
+
+# Editor
+.idea/
+.vscode/
+*.swp

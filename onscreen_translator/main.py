@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-onscreen-translator: Live on-screen translator for Linux/Wayland.
+onscreen-translator: On-screen translator for Linux/Wayland.
 Uses PaddleOCR + Argos Translate (fully offline, no API keys).
+
+Flow:
+  Super+T → takes ONE screenshot → shows region selector
+  User drags region → crops SAME screenshot → OCR → translate → show card
+  ⟳ Refresh button → takes ONE new screenshot → re-translate same region
+  ✕ or Super+T again → dismiss card
 """
 import sys
 import os
 import socket
 import logging
 import concurrent.futures
-import tempfile
 from urllib.parse import unquote
 
 import dbus
@@ -34,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    # DBus main loop must be set before any dbus usage
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 
     settings = Settings.load()
@@ -49,17 +53,20 @@ def main():
         max_workers=2, thread_name_prefix="ost-worker"
     )
 
-    # ── Live mode state ────────────────────────────────────────────────────────
+    # ── State ─────────────────────────────────────────────────────────────────
     _state = {
-        "live_region": None,   # (x, y, w, h) while live, None when stopped
-        "live_timer": None,
-        "last_text": "",
-        "busy": False,         # True while an OCR job is in flight
+        "region":    None,   # (x, y, w, h) of the currently translated region
+        "busy":      False,  # True while a screenshot request or OCR job is running
+        "fail_count": 0,
+        "_bg_path":  None,   # path to the most recent full-screen screenshot
     }
 
+    # ── Core pipeline ─────────────────────────────────────────────────────────
+
     def _process(image_path: str) -> dict:
+        """OCR + translate. Runs in a thread-pool worker."""
         text = ocr_engine.extract(image_path)
-        logger.info(f"OCR: {repr(text[:60])}")
+        logger.info(f"OCR text ({len(text)} chars):\n{text}")
         if not text.strip():
             return {
                 "source_language": "?",
@@ -67,127 +74,143 @@ def main():
                 "original": "",
                 "translated": "(no text detected)",
             }
-        result = translator.translate(text, target_lang=settings.target_language)
+        result = translator.translate(text, target_lang=settings.target_language, settings=settings)
         result.setdefault("target_language", settings.target_language)
+        logger.info(f"Translation ({result.get('source_language','?')} → {result.get('target_language','?')}):\n{result.get('translated','')}")
         return result
 
-    # ── Live mode ──────────────────────────────────────────────────────────────
-
-    def start_live_mode(x: int, y: int, w: int, h: int):
-        _state["live_region"] = (x, y, w, h)
-        _state["last_text"] = ""
-        _state["busy"] = False
-
-        def _on_stop():
-            stop_live_mode()
-
-        overlay.start_live(x, y, w, h, on_stop=_on_stop,
-                           show_original=settings.show_original)
-        overlay.show_status(f"Watching {w}×{h} region…")
-
-        # Kick off first tick immediately (one-shot), then every 2 seconds
-        GLib.idle_add(lambda: _live_tick() and False)
-        _state["live_timer"] = GLib.timeout_add(2000, _live_tick)
-        logger.info(f"Live mode started: region ({x},{y}) {w}×{h}")
-
-    def stop_live_mode():
-        timer = _state["live_timer"]
-        if timer is not None:
-            GLib.source_remove(timer)
-            _state["live_timer"] = None
-        _state["live_region"] = None
-        _state["busy"] = False
-        logger.info("Live mode stopped")
-
-    def _live_tick():
-        if _state["live_region"] is None:
-            return GLib.SOURCE_REMOVE
-        if _state["busy"]:
-            return GLib.SOURCE_CONTINUE
-
-        _state["busy"] = True
-        logger.debug("Live tick: requesting screenshot")
-
-        def _on_screenshot(uri: str):
-            image_path = unquote(uri.removeprefix("file://"))
-            region = _state["live_region"]
-            if region is None:
-                _state["busy"] = False
-                return
-            x, y, w, h = region
-            cropped = _crop_screenshot(image_path, x, y, w, h)
-            if cropped is None:
-                _state["busy"] = False
-                return
-            future = thread_pool.submit(_process, cropped)
-            future.add_done_callback(_on_live_done)
-
-        screenshot_portal.take_noninteractive(_on_screenshot)
-        return GLib.SOURCE_CONTINUE
-
-    def _crop_screenshot(full_path: str, x: int, y: int, w: int, h: int) -> str | None:
-        """Crop the full-screen PNG to the watched region. Returns temp file path."""
+    def _crop_and_process(full_path: str, x: int, y: int, w: int, h: int) -> dict | None:
+        """Crop full-screen screenshot to region, then OCR+translate. Runs in thread pool."""
+        from PIL import Image
         try:
-            from PIL import Image
             img = Image.open(full_path)
-            # Account for HiDPI scaling: image may be larger than logical pixels
-            scale = img.width / _get_screen_width()
-            sx = int(x * scale)
-            sy = int(y * scale)
-            sw = int(w * scale)
-            sh = int(h * scale)
+        except Exception as e:
+            logger.warning(f"Cannot open screenshot {full_path}: {e}")
+            return None
+
+        # Handle HiDPI: screenshot pixels may be 2× logical pixels
+        from gi.repository import Gdk as _Gdk
+        display = _Gdk.Display.get_default()
+        monitors = display.get_monitors()
+        screen_w = monitors.get_item(0).get_geometry().width if monitors.get_n_items() > 0 else 1920
+        scale = img.width / screen_w
+        sx, sy = int(x * scale), int(y * scale)
+        sw, sh = int(w * scale), int(h * scale)
+
+        try:
             crop = img.crop((sx, sy, sx + sw, sy + sh))
-            out = "/tmp/ost_live_crop.png"
+            out = "/tmp/ost_crop.png"
             crop.save(out)
-            return out
+            logger.debug(f"Cropped {full_path} → {out} (scale={scale:.2f})")
         except Exception as e:
             logger.warning(f"Crop failed: {e}")
             return None
 
-    def _get_screen_width() -> int:
-        import gi as _gi
-        _gi.require_version('Gdk', '4.0')
-        from gi.repository import Gdk as _Gdk
-        display = _Gdk.Display.get_default()
-        monitors = display.get_monitors()
-        if monitors.get_n_items() > 0:
-            return monitors.get_item(0).get_geometry().width
-        return 1920
+        return _process(out)
 
-    def _on_live_done(future):
+    def _on_translate_done(future):
+        """Called from thread pool when OCR+translate completes."""
         _state["busy"] = False
-        if _state["live_region"] is None:
-            return
         try:
             result = future.result()
+            _state["fail_count"] = 0
         except Exception:
-            logger.exception("Live OCR error")
+            logger.exception("OCR/translate error")
+            _state["fail_count"] += 1
+            GLib.idle_add(lambda: overlay.show_status("OCR failed — click Refresh to retry.") or False)
             return
-        orig = result.get("original", "").strip()
-        if orig and orig != _state["last_text"].strip():
-            _state["last_text"] = orig
-            GLib.idle_add(lambda: overlay.update_translation(
-                result, show_original=settings.show_original) or False)
+
+        if result is None:
+            GLib.idle_add(lambda: overlay.show_status("Could not read screenshot.") or False)
+            return
+
+        GLib.idle_add(lambda: overlay.update_translation(
+            result, show_original=settings.show_original) or False)
+
+    def _translate_region(x: int, y: int, w: int, h: int, bg_path: str | None):
+        """Submit a one-shot OCR+translate job for the given region of bg_path."""
+        if _state["busy"]:
+            logger.debug("translate_region: busy, skipping")
+            return
+        if not bg_path:
+            GLib.idle_add(lambda: overlay.show_status("No screenshot available.") or False)
+            return
+        _state["busy"] = True
+        _state["region"] = (x, y, w, h)
+        GLib.idle_add(lambda: overlay.show_status("Recognising text…") or False)
+        future = thread_pool.submit(_crop_and_process, bg_path, x, y, w, h)
+        future.add_done_callback(_on_translate_done)
+
+    # ── Refresh (on-demand, user-initiated) ───────────────────────────────────
+
+    def _refresh_translation():
+        """Take one new screenshot and re-translate the current region."""
+        region = _state["region"]
+        if region is None or _state["busy"]:
+            return
+        _state["busy"] = True   # hold lock during portal request
+        x, y, w, h = region
+        GLib.idle_add(lambda: overlay.show_status("Refreshing…") or False)
+
+        def _on_refresh_screenshot(uri: str):
+            bg_path = unquote(uri.removeprefix("file://"))
+            _state["_bg_path"] = bg_path
+            _state["busy"] = False   # release so _translate_region can re-acquire
+            _translate_region(x, y, w, h, bg_path)
+
+        sent = screenshot_portal.take_noninteractive(_on_refresh_screenshot)
+        if not sent:
+            _state["busy"] = False
+            GLib.idle_add(lambda: overlay.show_status("Screenshot unavailable.") or False)
 
     # ── Trigger handler ────────────────────────────────────────────────────────
 
     def _on_trigger():
-        if _state["live_region"] is not None:
-            # Second press stops live mode (overlay.stop() fires the stop callback)
-            logger.info("Trigger: stopping live mode")
+        if _state["region"] is not None:
+            # Second press: dismiss card and reset
+            logger.info("Trigger: dismissing card")
             overlay.stop()
+            _state["region"] = None
+            _state["busy"] = False
             return
 
-        # Start region selection
-        logger.info("Trigger: showing region selector")
+        if _state["busy"]:
+            logger.debug("Trigger: busy, ignoring")
+            return
+
+        logger.info("Trigger: capturing screenshot for selector…")
+        _state["busy"] = True   # hold during portal request
 
         def on_region_selected(x: int, y: int, w: int, h: int):
             if w < 10 or h < 10:
                 logger.info("Region too small or cancelled")
                 return
-            start_live_mode(x, y, w, h)
+            # Show card immediately, then kick off translation
+            def _on_stop():
+                _state["region"] = None
+                _state["busy"] = False
 
-        overlay.start_selecting(on_region_selected)
+            overlay.start_live(x, y, w, h, on_stop=_on_stop,
+                               show_original=settings.show_original)
+            overlay.set_refresh_callback(_refresh_translation)
+            # Reuse the selector screenshot for the initial translation
+            _state["busy"] = False   # release so _translate_region can acquire
+            _translate_region(x, y, w, h, _state["_bg_path"])
+
+        def _on_bg_screenshot(uri: str):
+            bg_path = unquote(uri.removeprefix("file://"))
+            _state["_bg_path"] = bg_path
+            _state["busy"] = False   # release before showing selector
+            logger.info(f"Background screenshot ready: {bg_path}")
+            GLib.idle_add(
+                lambda: overlay.start_selecting(on_region_selected, bg_path) or False
+            )
+
+        sent = screenshot_portal.take_noninteractive(_on_bg_screenshot)
+        if not sent:
+            _state["busy"] = False
+            logger.warning("Background screenshot unavailable — showing selector without background")
+            overlay.start_selecting(on_region_selected, None)
 
     # ── Unix socket listener ───────────────────────────────────────────────────
 
@@ -213,9 +236,9 @@ def main():
     # ── Background OCR init ────────────────────────────────────────────────────
 
     def _init_ocr():
-        logger.info("Initializing PaddleOCR…")
+        logger.info(f"Initializing PaddleOCR (lang={settings.ocr_language})…")
         try:
-            ocr_engine.initialize()
+            ocr_engine.initialize(lang=settings.ocr_language)
             logger.info("PaddleOCR ready — press Super+T to start")
         except Exception:
             logger.exception("PaddleOCR init failed")

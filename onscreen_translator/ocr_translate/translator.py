@@ -1,26 +1,38 @@
+import json
 import logging
+import urllib.request
+import urllib.error
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from onscreen_translator.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
 class Translator:
-    """Argos Translate wrapper for offline translation."""
+    """Ollama-backed translator. Runs fully offline via the local Ollama API."""
 
-    def translate(self, text: str, target_lang: str = "en") -> dict:
+    def translate(self, text: str, target_lang: str = "en",
+                  settings: "Settings | None" = None) -> dict:
         """
-        Detect source language and translate text.
-        Returns: {"source_language": str, "original": str, "translated": str}
+        Detect source language and translate text via Ollama.
+        Returns: {"source_language": str, "target_language": str,
+                  "original": str, "translated": str}
         """
         if not text.strip():
-            return {"source_language": "unknown", "original": text, "translated": text}
+            return {"source_language": "unknown", "target_language": target_lang,
+                    "original": text, "translated": text}
 
         src_lang = self._detect_language(text)
 
-        if src_lang == target_lang:
-            return {"source_language": src_lang, "original": text, "translated": text}
+        if settings is None:
+            from onscreen_translator.config.settings import Settings as _S
+            settings = _S.load()
 
-        translated = self._translate(text, src_lang, target_lang)
-        return {"source_language": src_lang, "original": text, "translated": translated}
+        translated = self._translate_ollama(text, settings)
+        return {"source_language": src_lang, "target_language": target_lang,
+                "original": text, "translated": translated}
 
     def _detect_language(self, text: str) -> str:
         try:
@@ -30,30 +42,41 @@ class Translator:
             logger.warning(f"Language detection failed: {e}")
             return "unknown"
 
-    def _translate(self, text: str, src_lang: str, tgt_lang: str) -> str:
-        try:
-            import argostranslate.translate
-            result = argostranslate.translate.translate(text, src_lang, tgt_lang)
-            if result:
-                return result
-        except Exception as e:
-            logger.error(f"Argos translation failed ({src_lang}→{tgt_lang}): {e}")
-
-        return (
-            f"[Translation unavailable: {src_lang}→{tgt_lang} package not installed.\n"
-            f"Run: python -c \"import argostranslate.package; "
-            f"argostranslate.package.update_package_index(); "
-            f"pkgs = argostranslate.package.get_available_packages(); "
-            f"pkg = next(p for p in pkgs if p.from_code=='{src_lang}' and p.to_code=='{tgt_lang}'); "
-            f"argostranslate.package.install_from_path(pkg.download())\"]"
+    def _translate_ollama(self, text: str, settings) -> str:
+        prompt = (
+            "Translate the following text to English. "
+            "Output only the translation — no explanations, no commentary, no quotes.\n\n"
+            f"{text}"
         )
+        payload = json.dumps({
+            "model": settings.ollama_model,
+            "prompt": prompt,
+            "stream": False,
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{settings.ollama_url}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read())
+                return data.get("response", "").strip()
+        except urllib.error.URLError as e:
+            logger.error(f"Ollama unreachable: {e}")
+            return f"[Ollama not running — start it with: ollama serve]"
+        except Exception as e:
+            logger.error(f"Ollama request failed: {e}")
+            return f"[Translation error: {e}]"
 
 
 if __name__ == "__main__":
     import sys
-    import json
+    import json as _json
     logging.basicConfig(level=logging.INFO)
-    text = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "Bonjour le monde"
+    text = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "こんにちは、世界"
     t = Translator()
     result = t.translate(text)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(_json.dumps(result, ensure_ascii=False, indent=2))

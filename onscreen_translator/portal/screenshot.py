@@ -57,7 +57,7 @@ class ScreenshotPortal:
         request_iface = dbus.Interface(request_obj, self.REQUEST_INTERFACE)
         request_iface.connect_to_signal("Response", on_response)
 
-    def take_noninteractive(self, callback: Callable[[str], None]):
+    def take_noninteractive(self, callback: Callable[[str], None]) -> bool:
         """
         Silently captures the full screen (no user interaction).
         callback(uri) is called on success with a 'file://...' URI.
@@ -73,7 +73,7 @@ class ScreenshotPortal:
             handle_path = self._iface.Screenshot("", options)
         except Exception as e:
             logger.warning(f"Non-interactive screenshot request failed: {e}")
-            return
+            return False
 
         logger.debug(f"Non-interactive screenshot handle: {handle_path}")
 
@@ -93,3 +93,4 @@ class ScreenshotPortal:
         request_obj = self._bus.get_object(self.BUS_NAME, handle_path)
         request_iface = dbus.Interface(request_obj, self.REQUEST_INTERFACE)
         request_iface.connect_to_signal("Response", on_response)
+        return True

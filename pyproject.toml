@@ -10,7 +10,6 @@ requires-python = ">=3.11"
 dependencies = [
     "paddleocr>=2.7",
     "paddlepaddle>=2.6",
-    "argostranslate>=1.9",
     "langdetect>=1.0",
 ]
 
