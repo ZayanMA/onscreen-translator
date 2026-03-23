@@ -194,8 +194,9 @@ LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 info "Launcher created at $LAUNCHER"
 
+# ── Create trigger script ─────────────────────────────────────────────────────
 LAUNCHER_TRIGGER="$SCRIPT_DIR/onscreen-translator-trigger"
-cat > "$LAUNCHER_TRIGGER" <<TRIGGER_EOF
+cat > "$LAUNCHER_TRIGGER" <<'TRIGGER_EOF'
 #!/usr/bin/env bash
 python3 -c "
 import socket, sys
@@ -211,38 +212,58 @@ TRIGGER_EOF
 chmod +x "$LAUNCHER_TRIGGER"
 info "Trigger script created at $LAUNCHER_TRIGGER"
 
-# ── Register GNOME keyboard shortcut via gsettings ────────────────────────────
-heading "Registering keyboard shortcut (Super+T)"
+# ── Install desktop entry ─────────────────────────────────────────────────────
+heading "Installing desktop entry"
 
-if command -v gsettings &>/dev/null; then
-    BINDING_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/onscreen-translator/"
-    BASE_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
-    BINDING_SCHEMA="$BASE_SCHEMA.custom-keybinding:$BINDING_PATH"
+APPS_DIR="$HOME/.local/share/applications"
+DESKTOP_SRC="$SCRIPT_DIR/data/onscreen-translator.desktop"
+mkdir -p "$APPS_DIR"
+DESKTOP_DEST="$APPS_DIR/dev.zayan.onscreen-translator.desktop"
+cp "$DESKTOP_SRC" "$DESKTOP_DEST"
+sed -i "s|^Exec=.*|Exec=$LAUNCHER|" "$DESKTOP_DEST"
+update-desktop-database "$APPS_DIR" 2>/dev/null || true
+info "Desktop entry installed at $DESKTOP_DEST"
 
-    # Set the individual shortcut properties
-    gsettings set "$BINDING_SCHEMA" name "Translate Screen" 2>/dev/null
-    gsettings set "$BINDING_SCHEMA" command "$LAUNCHER_TRIGGER" 2>/dev/null
-    gsettings set "$BINDING_SCHEMA" binding "<Super>t" 2>/dev/null
+# ── Keyboard shortcut setup ───────────────────────────────────────────────────
+heading "Keyboard shortcut setup"
 
-    # Add to the custom-keybindings list (preserve existing entries)
-    CURRENT=$(gsettings get "$BASE_SCHEMA" custom-keybindings 2>/dev/null || echo "@as []")
-    if echo "$CURRENT" | grep -q "onscreen-translator"; then
-        warn "Keyboard shortcut already registered — updated command path."
-    else
-        # Parse existing list and append our path
-        if [[ "$CURRENT" == "@as []" || "$CURRENT" == "[]" ]]; then
-            NEW_LIST="['$BINDING_PATH']"
-        else
-            # Remove trailing ] and append
-            NEW_LIST="${CURRENT%]}, '$BINDING_PATH']"
-        fi
-        gsettings set "$BASE_SCHEMA" custom-keybindings "$NEW_LIST" 2>/dev/null
-        info "Keyboard shortcut Super+T registered in GNOME"
-    fi
-else
-    warn "gsettings not found — skipping automatic hotkey registration."
-    warn "Manually add $LAUNCHER_TRIGGER as a custom GNOME keyboard shortcut."
+echo ""
+printf "  onscreen-translator is triggered by a command — you need to add it as\n"
+printf "  a custom keyboard shortcut in GNOME Settings.\n"
+echo ""
+printf "  ${BOLD}Steps:${RESET}\n"
+printf "  1. Open  Settings → Keyboard → View and Customize Shortcuts\n"
+printf "  2. Scroll to the bottom → ${BOLD}Custom Shortcuts${RESET} → click  ${BOLD}[+]${RESET}\n"
+printf "  3. ${BOLD}Name:${RESET}     Onscreen Translator\n"
+printf "  4. ${BOLD}Command:${RESET}  %s\n" "$LAUNCHER_TRIGGER"
+printf "  5. ${BOLD}Shortcut:${RESET} press  Super+T  then click  ${BOLD}Set${RESET}\n"
+echo ""
+
+read -rp "  Open GNOME keyboard settings now? [y/N] " OPEN_KBD
+if [[ "$OPEN_KBD" =~ ^[Yy]$ ]]; then
+    gnome-control-center keyboard &
+    echo ""
+    info "Opened GNOME keyboard settings — follow the steps above, then come back here."
 fi
+
+echo ""
+while true; do
+    read -rp "  Have you added the keyboard shortcut? [y/N] " KBD_DONE
+    if [[ "$KBD_DONE" =~ ^[Yy]$ ]]; then
+        info "Keyboard shortcut confirmed"
+        break
+    fi
+    echo ""
+    printf "  ${YELLOW}Not yet? That's fine — here are the steps again:${RESET}\n"
+    printf "  1. Settings → Keyboard → View and Customize Shortcuts\n"
+    printf "  2. Scroll down → Custom Shortcuts → [+]\n"
+    printf "  3. Name: Onscreen Translator\n"
+    printf "  4. Command: %s\n" "$LAUNCHER_TRIGGER"
+    printf "  5. Shortcut: Super+T → Set\n"
+    echo ""
+    printf "  (Press Ctrl+C to skip and add it manually later.)\n"
+    echo ""
+done
 
 # ── Autostart (optional) ──────────────────────────────────────────────────────
 heading "Autostart (optional)"
@@ -269,9 +290,10 @@ printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━
 printf "${BOLD}${GREEN}  onscreen-translator is ready!${RESET}\n"
 printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
 echo ""
-printf "  ${BOLD}Start:${RESET}   %s\n" "$LAUNCHER"
-printf "  ${BOLD}Hotkey:${RESET}  Super+T  (configurable in %s)\n" "$CONFIG_FILE"
-printf "  ${BOLD}Config:${RESET}  %s\n" "$CONFIG_FILE"
+printf "  ${BOLD}Start:${RESET}    %s\n" "$LAUNCHER"
+printf "  ${BOLD}Trigger:${RESET}  %s\n" "$LAUNCHER_TRIGGER"
+printf "  ${BOLD}Hotkey:${RESET}   Super+T  (GNOME custom shortcut → runs the trigger command)\n"
+printf "  ${BOLD}Config:${RESET}   %s\n" "$CONFIG_FILE"
 echo ""
 printf "  On first launch PaddleOCR will download its models (~450 MB).\n"
 printf "  Subsequent launches will be instant.\n"

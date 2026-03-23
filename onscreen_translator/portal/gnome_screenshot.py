@@ -35,6 +35,22 @@ class GnomeScreenshot:
     def is_available(self) -> bool:
         return bool(self._available)
 
+    def capture_full(self, dest_path: str) -> bool:
+        """Capture full screen into dest_path. Silent (no flash, no cursor). ~50ms."""
+        if not self._available:
+            return False
+        try:
+            success, _ = self._iface.Screenshot(
+                dbus.Boolean(False),   # include_cursor
+                dbus.Boolean(False),   # flash
+                dbus.String(dest_path),
+            )
+            return bool(success)
+        except dbus.DBusException as e:
+            logger.warning(f"Screenshot (full) failed: {e}")
+            self._available = False
+            return False
+
     def capture_area(self, x: int, y: int, w: int, h: int, dest_path: str) -> bool:
         """
         Capture screen region (x, y, w, h) into dest_path.

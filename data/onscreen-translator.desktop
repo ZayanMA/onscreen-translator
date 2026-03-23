@@ -7,3 +7,4 @@ Icon=accessories-dictionary
 Categories=Utility;
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
+StartupWMClass=dev.zayan.onscreen-translator

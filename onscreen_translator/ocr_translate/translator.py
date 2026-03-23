@@ -13,6 +13,29 @@ logger = logging.getLogger(__name__)
 class Translator:
     """Ollama-backed translator. Runs fully offline via the local Ollama API."""
 
+    def __init__(self):
+        self._cache: dict = {}  # md5(text) → translated string
+
+    def translate_group(self, group, settings) -> str:
+        """
+        Translate a TextGroup (from ocr.py). Uses a session cache so unchanged
+        text is never sent to Ollama twice. group.lines are joined with \\n to
+        preserve line structure for the LLM.
+        """
+        import hashlib
+        joined = "\n".join(group.lines)
+        key = hashlib.md5(joined.encode()).hexdigest()
+        if key in self._cache:
+            logger.debug(f"Translation cache hit: {joined[:40]!r}")
+            return self._cache[key]
+        result = self._translate_ollama(joined, settings)
+        self._cache[key] = result
+        logger.info(f"Translated (new): {joined[:40]!r} → {result[:60]!r}")
+        return result
+
+    def clear_cache(self):
+        self._cache.clear()
+
     def translate(self, text: str, target_lang: str = "en",
                   settings: "Settings | None" = None) -> dict:
         """
@@ -61,7 +84,7 @@ class Translator:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
                 return data.get("response", "").strip()
         except urllib.error.URLError as e:
