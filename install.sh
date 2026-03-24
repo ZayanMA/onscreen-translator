@@ -48,6 +48,10 @@ SYSTEM_PKGS=(
     python3-dbus
     python3-gi
     python3-gi-cairo
+    python3-gst-1.0
+    gstreamer1.0-pipewire
+    gstreamer1.0-plugins-good
+    gstreamer1.0-plugins-base
 )
 
 warn "Running: sudo apt-get install -y ${SYSTEM_PKGS[*]}"
@@ -77,14 +81,11 @@ VENV_PIP="$VENV_DIR/bin/pip"
 heading "Installing Python packages into venv"
 
 PIP_PKGS=(
-    "paddleocr>=2.7"
-    "paddlepaddle>=2.6"
-    "langdetect>=1.0"
+    "easyocr>=1.7"
+    "deepl>=1.17"
 )
 
 warn "This may take a few minutes (PaddlePaddle is large)…"
-# setuptools must be installed first — langdetect's setup.py uses distutils
-# which was removed in Python 3.12+ but setuptools provides a compatibility shim.
 if ! "$VENV_PIP" install --upgrade setuptools; then
     die "Failed to install setuptools."
 fi
@@ -93,48 +94,20 @@ if ! "$VENV_PIP" install "${PIP_PKGS[@]}"; then
 fi
 info "Python packages installed"
 
-# ── Ollama setup ──────────────────────────────────────────────────────────────
-heading "Ollama LLM setup (translation engine)"
+# ── DeepL API key ─────────────────────────────────────────────────────────────
+heading "DeepL Translation API setup"
 
-if ! command -v ollama &>/dev/null; then
-    warn "Ollama is not installed."
-    echo ""
-    printf "  Install it with:\n"
-    printf "    ${BOLD}curl -fsSL https://ollama.com/install.sh | sh${RESET}\n"
-    echo ""
-    printf "  Then pull a translation model:\n"
-    printf "    ${BOLD}ollama pull llama3.2${RESET}      (~2 GB, fast)\n"
-    printf "    ${BOLD}ollama pull qwen2.5:7b${RESET}    (~4.7 GB, better Japanese/Chinese quality)\n"
-    echo ""
-    warn "Re-run install.sh after installing Ollama to complete setup."
+echo ""
+printf "  DeepL provides ${BOLD}500,000 free characters/month${RESET} via its free API tier.\n"
+printf "  Get a free API key at: ${BOLD}https://www.deepl.com/pro-api${RESET}\n"
+echo ""
+read -rp "  Enter your DeepL API key (or press Enter to configure later): " DEEPL_KEY
+echo ""
+
+if [[ -n "$DEEPL_KEY" ]]; then
+    info "DeepL API key received — will be written to config after config file is created"
 else
-    info "Ollama found: $(ollama --version 2>/dev/null || echo 'unknown version')"
-    echo ""
-    echo "Which model should be used for translation?"
-    printf "  ${BOLD}1)${RESET} llama3.2      (~2 GB, fast, good general quality)\n"
-    printf "  ${BOLD}2)${RESET} qwen2.5:7b    (~4.7 GB, better Japanese/Chinese quality)\n"
-    printf "  ${BOLD}3)${RESET} Custom        (enter a model name manually)\n"
-    echo ""
-    read -rp "Choice [1]: " MODEL_CHOICE
-
-    case "$MODEL_CHOICE" in
-        2) CHOSEN_MODEL="qwen2.5:7b" ;;
-        3) read -rp "Model name: " CHOSEN_MODEL ;;
-        *) CHOSEN_MODEL="llama3.2" ;;
-    esac
-
-    info "Pulling ${CHOSEN_MODEL} — this may take several minutes…"
-    if ollama pull "$CHOSEN_MODEL"; then
-        info "Model ${CHOSEN_MODEL} ready"
-        # Update config.toml with chosen model
-        if [[ -f "$CONFIG_FILE" ]]; then
-            sed -i "s/^model = .*/model = \"${CHOSEN_MODEL}\"/" "$CONFIG_FILE" 2>/dev/null || true
-            info "Config updated: ollama model = ${CHOSEN_MODEL}"
-        fi
-    else
-        warn "ollama pull failed — you can pull the model manually later:"
-        warn "  ollama pull ${CHOSEN_MODEL}"
-    fi
+    warn "No API key entered — edit $CONFIG_FILE after install to add it"
 fi
 
 # ── Default config ────────────────────────────────────────────────────────────
@@ -149,26 +122,37 @@ if [[ -f "$CONFIG_FILE" ]]; then
     warn "Config already exists at $CONFIG_FILE — not overwriting."
 else
     cat > "$CONFIG_FILE" <<'TOML'
-[translation]
-# BCP-47 language code for the output language.
-# Must match an installed Argos Translate model.
-target_language = "en"
-
 [hotkey]
-# Hotkey to trigger the region picker.
-# Format: Modifier+Key  (e.g. "Super+t", "Ctrl+Alt+t")
+# Hotkey trigger command shortcut label.
 preferred_trigger = "Super+t"
 
 [overlay]
 # Seconds before the translation card auto-dismisses (0 = never).
 auto_dismiss_seconds = 12
 # Show the original OCR text above the translation.
-show_original = true
+show_original = false
 # Font sizes in pixels.
 font_size_translated = 15
 font_size_original = 11
+
+[ocr]
+# Language for text detection and recognition.
+# Japanese (manga, games, anime): "japan"  Others: "ch", "korean", "en"
+language = "japan"
+
+[deepl]
+# Free API key from https://www.deepl.com/pro-api (500,000 chars/month free)
+api_key = ""
+# Target language code. Examples: EN-US, EN-GB, DE, FR, ES, ZH
+target_language = "EN-US"
 TOML
     info "Config written to $CONFIG_FILE"
+fi
+
+# Write DeepL API key into config if provided
+if [[ -n "$DEEPL_KEY" ]]; then
+    sed -i "s/^api_key = \"\"/api_key = \"${DEEPL_KEY}\"/" "$CONFIG_FILE"
+    info "DeepL API key saved to $CONFIG_FILE"
 fi
 
 # ── Install the package itself into the venv ──────────────────────────────────
@@ -188,7 +172,6 @@ cat > "$LAUNCHER" <<LAUNCHER_EOF
 SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 export GI_TYPELIB_PATH="/usr/lib/x86_64-linux-gnu/girepository-1.0\${GI_TYPELIB_PATH:+:\$GI_TYPELIB_PATH}"
 export GDK_BACKEND=wayland
-export PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 exec "\$SCRIPT_DIR/.venv/bin/python" -m onscreen_translator.main "\$@"
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
@@ -295,6 +278,8 @@ printf "  ${BOLD}Trigger:${RESET}  %s\n" "$LAUNCHER_TRIGGER"
 printf "  ${BOLD}Hotkey:${RESET}   Super+T  (GNOME custom shortcut → runs the trigger command)\n"
 printf "  ${BOLD}Config:${RESET}   %s\n" "$CONFIG_FILE"
 echo ""
-printf "  On first launch PaddleOCR will download its models (~450 MB).\n"
-printf "  Subsequent launches will be instant.\n"
+printf "  On first launch, models will be downloaded automatically:\n"
+printf "    • PaddleOCR detection model  (~50 MB)\n"
+printf "    • Manga OCR model            (~400 MB, Japanese text recognition)\n"
+printf "  Subsequent launches are instant.\n"
 echo ""

@@ -8,9 +8,8 @@ version = "0.1.0"
 description = "Live on-screen translator for Linux/Wayland"
 requires-python = ">=3.11"
 dependencies = [
-    "paddleocr>=2.7",
-    "paddlepaddle>=2.6",
-    "langdetect>=1.0",
+    "easyocr>=1.7",
+    "deepl>=1.17",
 ]
 
 [project.scripts]

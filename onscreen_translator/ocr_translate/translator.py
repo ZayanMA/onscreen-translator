@@ -1,7 +1,4 @@
-import json
 import logging
-import urllib.request
-import urllib.error
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -11,16 +8,18 @@ logger = logging.getLogger(__name__)
 
 
 class Translator:
-    """Ollama-backed translator. Runs fully offline via the local Ollama API."""
+    """DeepL-backed translator. Requires a DeepL API key in config."""
 
     def __init__(self):
-        self._cache: dict = {}  # md5(text) → translated string
+        self._cache: dict = {}        # md5(text) → translated string
+        self._client = None           # deepl.Translator instance (created on first use)
+        self._client_api_key: str = ""  # key used to build _client
 
     def translate_group(self, group, settings) -> str:
         """
         Translate a TextGroup (from ocr.py). Uses a session cache so unchanged
-        text is never sent to Ollama twice. group.lines are joined with \\n to
-        preserve line structure for the LLM.
+        text is never sent to DeepL twice. group.lines are joined with \\n to
+        preserve line structure.
         """
         import hashlib
         joined = "\n".join(group.lines)
@@ -28,78 +27,59 @@ class Translator:
         if key in self._cache:
             logger.debug(f"Translation cache hit: {joined[:40]!r}")
             return self._cache[key]
-        result = self._translate_ollama(joined, settings)
+        result = self._translate_deepl(joined, settings)
         self._cache[key] = result
-        logger.info(f"Translated (new): {joined[:40]!r} → {result[:60]!r}")
+        logger.info(f"Translated: {joined[:40]!r} → {result[:60]!r}")
         return result
 
     def clear_cache(self):
         self._cache.clear()
 
-    def translate(self, text: str, target_lang: str = "en",
-                  settings: "Settings | None" = None) -> dict:
-        """
-        Detect source language and translate text via Ollama.
-        Returns: {"source_language": str, "target_language": str,
-                  "original": str, "translated": str}
-        """
-        if not text.strip():
-            return {"source_language": "unknown", "target_language": target_lang,
-                    "original": text, "translated": text}
+    def _get_client(self, api_key: str):
+        """Return cached deepl.Translator, creating it if the key has changed."""
+        import deepl
+        if self._client is None or self._client_api_key != api_key:
+            self._client = deepl.Translator(api_key)
+            self._client_api_key = api_key
+        return self._client
 
-        src_lang = self._detect_language(text)
-
-        if settings is None:
-            from onscreen_translator.config.settings import Settings as _S
-            settings = _S.load()
-
-        translated = self._translate_ollama(text, settings)
-        return {"source_language": src_lang, "target_language": target_lang,
-                "original": text, "translated": translated}
-
-    def _detect_language(self, text: str) -> str:
+    def _translate_deepl(self, text: str, settings) -> str:
+        if not settings.deepl_api_key:
+            return "[ERROR: DeepL API key not set — add it to ~/.config/onscreen-translator/config.toml]"
         try:
-            from langdetect import detect
-            return detect(text)
+            import deepl
+            client = self._get_client(settings.deepl_api_key)
+            key_hint = settings.deepl_api_key[:8] + "..."
+            logger.info(f"Calling DeepL API (key={key_hint}, chars={len(text)})")
+            result = client.translate_text(
+                text,
+                target_lang=settings.deepl_target_lang,
+                # source_lang=None → DeepL auto-detects
+            )
+            logger.info(f"DeepL OK — returned {len(result.text)} chars")
+            return result.text
+        except deepl.AuthorizationException:
+            logger.error("DeepL API key is INVALID — check ~/.config/onscreen-translator/config.toml")
+            return "[ERROR: DeepL API key invalid]"
+        except deepl.QuotaExceededException:
+            logger.error("DeepL free quota exceeded")
+            return "[ERROR: DeepL quota exceeded]"
         except Exception as e:
-            logger.warning(f"Language detection failed: {e}")
-            return "unknown"
-
-    def _translate_ollama(self, text: str, settings) -> str:
-        prompt = (
-            "Translate the following text to English. "
-            "Output only the translation — no explanations, no commentary, no quotes.\n\n"
-            f"{text}"
-        )
-        payload = json.dumps({
-            "model": settings.ollama_model,
-            "prompt": prompt,
-            "stream": False,
-        }).encode()
-
-        req = urllib.request.Request(
-            f"{settings.ollama_url}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
-                return data.get("response", "").strip()
-        except urllib.error.URLError as e:
-            logger.error(f"Ollama unreachable: {e}")
-            return f"[Ollama not running — start it with: ollama serve]"
-        except Exception as e:
-            logger.error(f"Ollama request failed: {e}")
-            return f"[Translation error: {e}]"
+            logger.error(f"DeepL request failed: {e}")
+            return f"[ERROR: {e}]"
 
 
 if __name__ == "__main__":
     import sys
-    import json as _json
+    import json
     logging.basicConfig(level=logging.INFO)
+    from onscreen_translator.config.settings import Settings
+    settings = Settings.load()
     text = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "こんにちは、世界"
     t = Translator()
-    result = t.translate(text)
-    print(_json.dumps(result, ensure_ascii=False, indent=2))
+
+    class _FakeGroup:
+        lines = [text]
+
+    result = t.translate_group(_FakeGroup(), settings)
+    print(json.dumps({"original": text, "translated": result}, ensure_ascii=False, indent=2))

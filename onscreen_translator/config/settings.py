@@ -6,9 +6,6 @@ from dataclasses import dataclass, field
 CONFIG_PATH = Path.home() / ".config" / "onscreen-translator" / "config.toml"
 
 DEFAULT_CONFIG = """
-[translation]
-target_language = "en"
-
 [hotkey]
 preferred_trigger = "Super+t"
 
@@ -19,28 +16,28 @@ font_size_translated = 15
 font_size_original = 11
 
 [ocr]
-# PaddleOCR language code for text recognition.
-# Common values: japan, ch, korean, en, chinese_cht, latin
+# Language for text detection.
+# For Japanese (manga, games, anime): "japan"
+# Other options: "ch", "korean", "en", "chinese_cht", "latin"
 language = "japan"
 
-[ollama]
-# Local Ollama model used for translation.
-# Smaller/faster: llama3.2  Better Japanese quality: qwen2.5:7b
-model = "llama3.2"
-url   = "http://localhost:11434"
+[deepl]
+# Free API key from https://www.deepl.com/pro-api (500,000 chars/month free)
+api_key = ""
+# Target language code. Examples: EN-US, EN-GB, DE, FR, ES, ZH
+target_language = "EN-US"
 """.strip()
 
 @dataclass
 class Settings:
-    target_language: str = "en"
     preferred_trigger: str = "Super+t"
     auto_dismiss_seconds: int = 12
     show_original: bool = False
     font_size_translated: int = 15
     font_size_original: int = 11
     ocr_language: str = "japan"
-    ollama_model: str = "llama3.2"
-    ollama_url:   str = "http://localhost:11434"
+    deepl_api_key:     str = ""
+    deepl_target_lang: str = "EN-US"
 
     @classmethod
     def load(cls) -> "Settings":
@@ -51,20 +48,18 @@ class Settings:
         with open(CONFIG_PATH, "rb") as f:
             data = tomllib.load(f)
 
-        t  = data.get("translation", {})
-        h  = data.get("hotkey", {})
-        o  = data.get("overlay", {})
+        h   = data.get("hotkey", {})
+        o   = data.get("overlay", {})
         ocr = data.get("ocr", {})
-        ol  = data.get("ollama", {})
+        dl  = data.get("deepl", {})
 
         return cls(
-            target_language=t.get("target_language", "en"),
             preferred_trigger=h.get("preferred_trigger", "Super+t"),
             auto_dismiss_seconds=o.get("auto_dismiss_seconds", 12),
-            show_original=o.get("show_original", True),
+            show_original=o.get("show_original", False),
             font_size_translated=o.get("font_size_translated", 15),
             font_size_original=o.get("font_size_original", 11),
             ocr_language=ocr.get("language", "japan"),
-            ollama_model=ol.get("model", "llama3.2"),
-            ollama_url=ol.get("url", "http://localhost:11434"),
+            deepl_api_key=dl.get("api_key", ""),
+            deepl_target_lang=dl.get("target_language", "EN-US"),
         )

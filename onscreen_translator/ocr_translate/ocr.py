@@ -39,10 +39,17 @@ def _is_japanese(text: str) -> bool:
     return False
 
 
-def cluster_groups(boxes: list, gap_factor: float = 1.8) -> list:
+def cluster_groups(boxes: list, gap_factor: float = 0.5) -> list:
     """
-    Group vertically-adjacent TextBoxes into TextGroups (logical paragraphs).
-    Boxes within gap_factor * avg_box_height of each other are merged.
+    Group spatially-adjacent TextBoxes into TextGroups (logical paragraphs).
+    Two boxes are merged when they are both:
+      - Vertically close: next box starts within gap_factor * box_height below the last
+      - Horizontally close: X ranges overlap or are within 2 * box_height of each other
+
+    Each group's lines are sorted by reading direction:
+      - Horizontal text (width > height): top-to-bottom, left-to-right
+      - Vertical text (height > width): right-to-left columns (Japanese tategumi)
+
     Returns list[TextGroup].
     """
     if not boxes:
@@ -52,14 +59,25 @@ def cluster_groups(boxes: list, gap_factor: float = 1.8) -> list:
     for box in sorted_boxes[1:]:
         last = groups[-1][-1]
         avg_h = max(last.y2 - last.y1, 1)
-        if box.y1 <= last.y2 + avg_h * gap_factor:
+        vertically_close = box.y1 <= last.y2 + avg_h * gap_factor
+        x_tolerance = avg_h * 2
+        horizontally_close = box.x1 <= last.x2 + x_tolerance and box.x2 >= last.x1 - x_tolerance
+        if vertically_close and horizontally_close:
             groups[-1].append(box)
         else:
             groups.append([box])
+
     result = []
     for g in groups:
+        n_vertical = sum(1 for b in g if (b.y2 - b.y1) > (b.x2 - b.x1))
+        if n_vertical > len(g) / 2:
+            # Vertical (tategumi): columns read right-to-left
+            g_ordered = sorted(g, key=lambda b: -b.x1)
+        else:
+            # Horizontal (yokogumi): top-to-bottom, left-to-right
+            g_ordered = sorted(g, key=lambda b: (b.y1, b.x1))
         result.append(TextGroup(
-            lines=[b.text for b in g],
+            lines=[b.text for b in g_ordered],
             x1=min(b.x1 for b in g),
             y1=min(b.y1 for b in g),
             x2=max(b.x2 for b in g),
@@ -71,86 +89,53 @@ def cluster_groups(boxes: list, gap_factor: float = 1.8) -> list:
 # ── OCR Engine ────────────────────────────────────────────────────────────────
 
 class OCREngine:
-    """PaddleOCR wrapper. Keep one instance alive for the process lifetime."""
+    """
+    EasyOCR-backed OCR engine for Japanese text.
+    Uses CRAFT detection + CRNN recognition — better than PaddleOCR mobile for
+    stylised game/visual-novel fonts. No preprocessing required.
+    """
 
     def __init__(self):
-        self._ocr = None
+        self._reader = None  # easyocr.Reader instance
 
     def initialize(self, lang: str = "japan"):
         """Load models. Call in a background thread at startup."""
-        import logging as _logging
-        for _name in ("ppocr", "paddle", "paddleocr", "paddlex"):
-            _logging.getLogger(_name).setLevel(_logging.ERROR)
-
-        from paddleocr import PaddleOCR
-        self._ocr = PaddleOCR(lang=lang, enable_mkldnn=False)
-        logger.info(f"PaddleOCR initialized (lang={lang})")
-
-    def extract(self, image_path: str) -> str:
-        """Extract all text from image. Returns space-joined text lines."""
-        boxes = self.extract_with_boxes(image_path)
-        return " ".join(b.text for b in boxes)
+        import easyocr
+        # EasyOCR language code for Japanese is 'ja'
+        # gpu=False: safe CPU-only default (set to True if CUDA is available)
+        # Models (~200 MB) are downloaded automatically on first use
+        self._reader = easyocr.Reader(['ja'], gpu=False, verbose=False)
+        logger.info("EasyOCR initialized (lang=ja)")
 
     def extract_with_boxes(self, image_path: str) -> list:
-        """
-        Run OCR on image_path. Returns list[TextBox] for all detected text,
-        regardless of language (caller filters as needed).
-        """
-        if self._ocr is None:
+        """Run OCR on image_path. Returns list[TextBox]."""
+        if self._reader is None:
             raise RuntimeError("OCREngine not initialized. Call initialize() first.")
-
-        result = self._ocr.ocr(image_path)
-        if not result:
-            return []
-
+        # detail=1 → returns (bbox, text, confidence)
+        # paragraph=False → one result per detected text line
+        results = self._reader.readtext(image_path, detail=1, paragraph=False)
         boxes = []
-        for page in result:
-            if page is None:
+        for bbox, text, score in results:
+            if score < 0.3:
                 continue
-            if isinstance(page, dict):
-                # PaddleOCR 3.x / PaddleX pipeline
-                texts = page.get("rec_texts", [])
-                scores = page.get("rec_scores", [])
-                polys = page.get("rec_polys", [])
-                for text, score, poly in zip(texts, scores, polys):
-                    if score < 0.3:
-                        continue
-                    try:
-                        import numpy as np
-                        poly = np.array(poly)
-                        xs, ys = poly[:, 0], poly[:, 1]
-                        boxes.append(TextBox(
-                            text=text, score=score,
-                            x1=int(xs.min()), y1=int(ys.min()),
-                            x2=int(xs.max()), y2=int(ys.max()),
-                        ))
-                    except Exception:
-                        boxes.append(TextBox(text=text, score=score,
-                                             x1=0, y1=0, x2=0, y2=0))
-            else:
-                # PaddleOCR 2.x: list of [box, (text, score)]
-                for item in page:
-                    if hasattr(item, 'text'):
-                        if item.score >= 0.3:
-                            boxes.append(TextBox(item.text, item.score,
-                                                 0, 0, 0, 0))
-                    elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                        text_info = item[1]
-                        if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
-                            text, score = text_info[0], text_info[1]
-                            if score >= 0.3:
-                                boxes.append(TextBox(text, score, 0, 0, 0, 0))
+            # bbox = [[x1,y1],[x2,y1],[x2,y2],[x1,y2]] (quadrilateral)
+            xs = [p[0] for p in bbox]
+            ys = [p[1] for p in bbox]
+            boxes.append(TextBox(
+                text=text, score=score,
+                x1=int(min(xs)), y1=int(min(ys)),
+                x2=int(max(xs)), y2=int(max(ys)),
+            ))
         return boxes
 
     def extract_japanese_groups(self, image_path: str) -> list:
         """
         Extract Japanese text from image, cluster into spatial groups.
-        Returns list[TextGroup] — each group is a logical block of text
-        (e.g. one speech bubble, one subtitle line).
+        Returns list[TextGroup].
         """
         boxes = self.extract_with_boxes(image_path)
-        japanese = [b for b in boxes if _is_japanese(b.text)]
-        return cluster_groups(japanese)
+        boxes = [b for b in boxes if _is_japanese(b.text)]
+        return cluster_groups(boxes)
 
 
 if __name__ == "__main__":

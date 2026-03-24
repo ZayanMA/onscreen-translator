@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 onscreen-translator: Continuous live translation overlay for Linux/Wayland.
-Uses PaddleOCR + Ollama (fully offline).
+Uses PaddleOCR + DeepL API.
 
 Flow:
   Super+T → start live mode
-    Every 0.8s: silent screenshot → OCR full screen → find Japanese text groups
+    Every 0.5s: read frame from PipeWire ScreenCast stream (silent, no screenshot sound)
+    → OCR full screen → find Japanese text groups
     → translate each group in parallel (cached) → overlay translations at exact screen positions
   Super+T again → stop, hide overlay
 """
@@ -14,10 +15,8 @@ import os
 import socket
 import logging
 import hashlib
+import tempfile
 import concurrent.futures
-
-import dbus
-import dbus.mainloop.glib
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -26,7 +25,7 @@ from gi.repository import Gtk, GLib, Gdk
 from onscreen_translator.config.settings import Settings
 from onscreen_translator.ocr_translate.ocr import OCREngine, cluster_groups
 from onscreen_translator.ocr_translate.translator import Translator
-from onscreen_translator.portal.screenshot import ScreenshotPortal
+from onscreen_translator.portal.screencast import ScreenCastPortal
 from onscreen_translator.overlay.translation_overlay import TranslationOverlay
 
 SOCKET_PATH = "/tmp/onscreen-translator.sock"
@@ -39,15 +38,12 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-
     settings = Settings.load()
-    session_bus = dbus.SessionBus()
 
     ocr_engine = OCREngine()
     translator = Translator()
     overlay = TranslationOverlay()
-    screenshot_portal = ScreenshotPortal(session_bus)
+    screencast_portal = ScreenCastPortal()
     thread_pool = concurrent.futures.ThreadPoolExecutor(
         max_workers=4, thread_name_prefix="ost-worker"
     )
@@ -56,7 +52,7 @@ def main():
     _live = {
         "active":    False,
         "pending":   False,   # True while an OCR job is running
-        "last_hash": None,    # MD5 of last processed screenshot bytes
+        "last_hash": None,    # MD5 of last processed frame bytes
     }
 
     # ── Frame processing (runs in thread pool) ────────────────────────────────
@@ -67,51 +63,61 @@ def main():
             return monitors.get_item(0).get_geometry().width
         return 1920
 
-    def _process_frame(path: str):
-        """OCR the screenshot, translate groups in parallel, update overlay."""
-        from PIL import Image
+    def _process_frame(img):
+        """OCR the frame, translate groups in parallel, update overlay."""
         try:
-            img = Image.open(path)
-        except Exception as e:
-            logger.warning(f"[live] Cannot open screenshot {path}: {e}")
-            _live["pending"] = False
-            return
+            frame_hash = hashlib.md5(img.tobytes()).hexdigest()
+            if frame_hash == _live["last_hash"]:
+                logger.debug("[live] frame unchanged, skipping OCR")
+                _live["pending"] = False
+                return
 
-        frame_hash = hashlib.md5(img.tobytes()).hexdigest()
-        if frame_hash == _live["last_hash"]:
-            logger.debug("[live] frame unchanged, skipping OCR")
-            _live["pending"] = False
-            return
+            _live["last_hash"] = frame_hash
+            logger.info("[live] frame changed → running OCR")
 
-        _live["last_hash"] = frame_hash
-        logger.info("[live] frame changed → running OCR")
+            # Save to tmp file for PaddleOCR (requires a file path)
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            img.save(tmp.name)
+            tmp.close()
+            path = tmp.name
 
-        groups = ocr_engine.extract_japanese_groups(path)
-        logger.info(f"[live] found {len(groups)} Japanese text group(s)")
-
-        screen_w = _get_screen_width()
-        scale = img.width / max(screen_w, 1)
-        logger.info(f"[live] img={img.width}x{img.height} screen_w={screen_w} scale={scale:.3f}")
-
-        for g in groups:
-            logger.info(f"[live] group at ({g.x1},{g.y1})-({g.x2},{g.y2}) → overlay ({int(g.x1/scale)},{int(g.y1/scale)})")
-
-        # Translate groups in parallel
-        futures = {
-            thread_pool.submit(translator.translate_group, group, settings): group
-            for group in groups
-        }
-        results = []
-        for fut, group in futures.items():
             try:
-                translated = fut.result(timeout=20)
-            except Exception as e:
-                logger.warning(f"[live] translation failed: {e}")
-                translated = ""
-            results.append((group, translated))
+                groups = ocr_engine.extract_japanese_groups(path)
+            finally:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
 
-        _live["pending"] = False
-        GLib.idle_add(lambda: overlay.update(results, scale) or False)
+            logger.info(f"[live] found {len(groups)} Japanese text group(s)")
+
+            screen_w = _get_screen_width()
+            scale = img.width / max(screen_w, 1)
+            logger.info(f"[live] img={img.width}x{img.height} screen_w={screen_w} scale={scale:.3f}")
+
+            for g in groups:
+                logger.info(f"[live] group at ({g.x1},{g.y1})-({g.x2},{g.y2}) → overlay ({int(g.x1/scale)},{int(g.y1/scale)})")
+
+            # Translate groups in parallel
+            futures = {
+                thread_pool.submit(translator.translate_group, group, settings): group
+                for group in groups
+            }
+            results = []
+            for fut, group in futures.items():
+                try:
+                    translated = fut.result(timeout=20)
+                except Exception as e:
+                    logger.warning(f"[live] translation failed: {e}")
+                    translated = ""
+                results.append((group, translated))
+
+            _live["pending"] = False
+            GLib.idle_add(lambda: overlay.update(results, scale) or False)
+
+        except Exception as e:
+            logger.warning(f"[live] _process_frame error: {e}")
+            _live["pending"] = False
 
     # ── Capture tick (called by GLib timer) ───────────────────────────────────
 
@@ -121,16 +127,15 @@ def main():
         if _live["pending"]:
             logger.debug("[live] previous frame still processing, skipping tick")
             return GLib.SOURCE_CONTINUE
+        if not screencast_portal.is_ready():
+            return GLib.SOURCE_CONTINUE
 
-        def _on_screenshot(uri: str):
-            from urllib.parse import unquote
-            path = unquote(uri.removeprefix("file://"))
-            _live["pending"] = True
-            thread_pool.submit(_process_frame, path)
+        img = screencast_portal.get_frame()
+        if img is None:
+            return GLib.SOURCE_CONTINUE
 
-        sent = screenshot_portal.take_noninteractive(_on_screenshot)
-        if not sent:
-            logger.warning("[live] screenshot portal unavailable")
+        _live["pending"] = True
+        thread_pool.submit(_process_frame, img)
         return GLib.SOURCE_CONTINUE
 
     # ── Start / stop live mode ────────────────────────────────────────────────
@@ -141,7 +146,7 @@ def main():
         _live["last_hash"] = None
         translator.clear_cache()
         overlay.show()
-        GLib.timeout_add(800, _live_tick)
+        GLib.timeout_add(500, _live_tick)
 
     def _stop_live():
         logger.info("Live translation mode: OFF")
@@ -179,17 +184,25 @@ def main():
     GLib.io_add_watch(trigger_sock.fileno(), GLib.IO_IN, on_socket_ready)
     logger.info(f"Listening on {SOCKET_PATH}")
 
-    # ── Background OCR init ────────────────────────────────────────────────────
+    # ── Background init (OCR + ScreenCast portal) ──────────────────────────────
 
-    def _init_ocr():
-        logger.info(f"Initializing PaddleOCR (lang={settings.ocr_language})…")
+    def _init_background():
+        logger.info(f"Initializing EasyOCR (lang={settings.ocr_language})…")
         try:
             ocr_engine.initialize(lang=settings.ocr_language)
-            logger.info("PaddleOCR ready — press Super+T to start live translation")
+            logger.info("PaddleOCR ready")
         except Exception:
             logger.exception("PaddleOCR init failed")
 
-    thread_pool.submit(_init_ocr)
+        logger.info("Starting ScreenCast portal session…")
+        try:
+            screencast_portal.setup()
+        except Exception:
+            logger.exception("ScreenCast portal setup failed")
+
+        logger.info("Ready — press Super+T to start live translation")
+
+    thread_pool.submit(_init_background)
 
     # ── GTK app loop ───────────────────────────────────────────────────────────
 
