@@ -145,6 +145,7 @@ def main():
         _live["active"] = True
         _live["last_hash"] = None
         translator.clear_cache()
+        ocr_engine.clear_region_cache()
         overlay.show()
         GLib.timeout_add(500, _live_tick)
 
@@ -154,6 +155,7 @@ def main():
         _live["pending"] = False
         overlay.hide()
         translator.clear_cache()
+        ocr_engine.clear_region_cache()
 
     # ── Trigger handler ────────────────────────────────────────────────────────
 
@@ -187,7 +189,7 @@ def main():
     # ── Background init (OCR + ScreenCast portal) ──────────────────────────────
 
     def _init_background():
-        logger.info(f"Initializing EasyOCR (lang={settings.ocr_language})…")
+        logger.info(f"Initializing PaddleOCR (lang={settings.ocr_language})…")
         try:
             ocr_engine.initialize(lang=settings.ocr_language)
             logger.info("PaddleOCR ready")

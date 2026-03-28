@@ -81,7 +81,8 @@ VENV_PIP="$VENV_DIR/bin/pip"
 heading "Installing Python packages into venv"
 
 PIP_PKGS=(
-    "easyocr>=1.7"
+    "paddleocr>=2.7"
+    "paddlepaddle>=2.6"
     "deepl>=1.17"
 )
 
@@ -172,6 +173,7 @@ cat > "$LAUNCHER" <<LAUNCHER_EOF
 SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 export GI_TYPELIB_PATH="/usr/lib/x86_64-linux-gnu/girepository-1.0\${GI_TYPELIB_PATH:+:\$GI_TYPELIB_PATH}"
 export GDK_BACKEND=wayland
+export PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 exec "\$SCRIPT_DIR/.venv/bin/python" -m onscreen_translator.main "\$@"
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
